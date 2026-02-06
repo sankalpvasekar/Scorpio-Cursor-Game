@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scorpion Project: Cursor</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            /* Dark space background */
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #00ffff;
+            pointer-events: none;
+            text-shadow: 0 0 10px #00ffff;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; opacity: 0.2; 
+        background-image: url('scorpion_bg.png'); 
+        background-size: cover; 
+        background-position: center;">
+    </div>
+
+    <div id="ui">
+        <h1>SCORPION PROJECT</h1>
+        <p>Move mouse to control prototype.</p>
+    </div>
+
+    <script>
+        // --- INPUT HANDLING ---
+        var Input = { mouse: { x: window.innerWidth / 2, y: window.innerHeight / 2 } };
+        document.addEventListener("mousemove", (e) => {
+            Input.mouse.x = e.clientX;
+            Input.mouse.y = e.clientY;
+        });
+
+        // --- CANVAS SETUP ---
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        document.body.appendChild(canvas);
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        // --- PHYSICS CLASSES ---
+
+        // A single bone/body part
+        class Segment {
+            constructor(parent, size, angle, range, stiffness) {
+                this.parent = parent; // The segment this connects to
+                if (parent.children) parent.children.push(this);
+
+                this.children = [];
+                this.size = size;       // Length of segment
+                this.relAngle = angle;  // Angle relative to parent
+                this.defAngle = angle;  // Resting angle
+                this.absAngle = parent.absAngle + angle; // World angle
+                this.range = range;     // How far it can bend
+                this.stiffness = stiffness; // How hard it tries to stay straight
+
+                // Position calculation
+                this.x = parent.x + Math.cos(this.absAngle) * size;
+                this.y = parent.y + Math.sin(this.absAngle) * size;
+            }
+
+            update(iter) {
+                // IK Logic: Snap back to natural angle slowly
+                this.relAngle -= (this.relAngle - this.defAngle) * 0.05 * this.stiffness;
+
+                // Clamp angle to range
+                this.relAngle = Math.max(this.defAngle - this.range / 2, Math.min(this.defAngle + this.range / 2, this.relAngle));
+
+                // Calculate absolute position based on parent
+                this.absAngle = this.parent.absAngle + this.relAngle;
+                this.x = this.parent.x + Math.cos(this.absAngle) * this.size;
+                this.y = this.parent.y + Math.sin(this.absAngle) * this.size;
+
+                if (iter) this.children.forEach(c => c.update(true));
+            }
+
+            // Inverse Kinematics (The dragging effect)
+            follow(targetX, targetY) {
+                // Point at target
+                const angle = Math.atan2(targetY - this.y, targetX - this.x);
+
+                // "Drag" logic
+                this.absAngle = angle;
+                this.x = targetX - Math.cos(this.absAngle) * this.size;
+                this.y = targetY - Math.sin(this.absAngle) * this.size;
+
+                // Calculate relative angle for the parent to know next frame
+                this.relAngle = this.absAngle - this.parent.absAngle;
+
+                // Normalize angle
+                while (this.relAngle > Math.PI) this.relAngle -= Math.PI * 2;
+                while (this.relAngle < -Math.PI) this.relAngle += Math.PI * 2;
+            }
+        }
+
+        // A chain of segments (Legs, Tail)
+        class Limb {
+            constructor(anchor, segments, sideAngle) {
+                this.anchor = anchor;
+                this.segments = segments;
+                this.side = sideAngle || 0;
+                this.stepState = 0; // 0 = planted, 1 = moving
+                this.target = { x: anchor.x, y: anchor.y }; // Where the foot wants to go
+                this.current = { x: anchor.x, y: anchor.y }; // Where the foot is
+            }
+
+            update(groundTarget) {
+                // Distance from hip to current foot pos
+                let dist = Math.hypot(this.anchor.x - this.current.x, this.anchor.y - this.current.y);
+                let maxReach = this.segments.length * this.segments[0].size * 0.8;
+
+                // If foot is too far, lift it
+                if (this.stepState === 0 && dist > maxReach) {
+                    this.stepState = 1;
+                    // Calculate new step position (ahead of movement)
+                    let angle = this.anchor.absAngle + this.side;
+                    this.target.x = this.anchor.x + Math.cos(angle) * maxReach * 0.8 + (Math.random() - 0.5) * 20;
+                    this.target.y = this.anchor.y + Math.sin(angle) * maxReach * 0.8 + (Math.random() - 0.5) * 20;
+                }
+
+                // Move foot towards target
+                if (this.stepState === 1) {
+                    let moveX = this.target.x - this.current.x;
+                    let moveY = this.target.y - this.current.y;
+                    this.current.x += moveX * 0.2;
+                    this.current.y += moveY * 0.2;
+                    if (Math.hypot(moveX, moveY) < 5) this.stepState = 0;
+                }
+
+                // IK: Apply positions to segments backward from foot to hip
+                let tx = this.current.x;
+                let ty = this.current.y;
+                for (let i = this.segments.length - 1; i >= 0; i--) {
+                    let seg = this.segments[i];
+                    seg.absAngle = Math.atan2(ty - seg.parent.y, tx - seg.parent.x);
+                    seg.x = tx;
+                    seg.y = ty;
+                    // Calculate where the start of this segment must be
+                    tx = tx - Math.cos(seg.absAngle) * seg.size;
+                    ty = ty - Math.sin(seg.absAngle) * seg.size;
+                }
+            }
+
+            drawStyler(ctx, isClaw) {
+                // Draw the limb segments
+                for (let i = 0; i < this.segments.length; i++) {
+                    let s = this.segments[i];
+                    let width = isClaw ? 8 - i : 4;
+                    drawShell(ctx, s.parent.x, s.parent.y, s.x, s.y, width, "#1a1a2e", "#4e4e80");
+                }
+            }
+        }
+
+        // The Main Body
+        class Scorpion {
+            constructor() {
+                this.x = window.innerWidth / 2;
+                this.y = window.innerHeight / 2;
+                this.angle = 0;
+                this.speed = 0;
+                this.segments = []; // Spine
+                this.limbs = [];    // Legs
+                this.claws = [];    // Arms
+
+                // 1. Create Spine (Head to Tail)
+                let prev = this; // Start with 'this' (the head controller)
+                this.absAngle = 0;
+                this.children = [];
+
+                // Body Segments
+                for (let i = 0; i < 8; i++) {
+                    let s = new Segment(prev, 15, 0, 0.5, 0.8);
+                    this.segments.push(s);
+                    prev = s;
+                }
+
+                // Tail Segments (Longer, more flexible)
+                for (let i = 0; i < 6; i++) {
+                    let s = new Segment(prev, 20, 0, 1.5, 0.2); // Low stiffness for curl
+                    this.segments.push(s);
+                    prev = s;
+                }
+                this.tailTip = prev;
+
+                // 2. Create Legs (Attached to first few body segments)
+                for (let i = 0; i < 4; i++) {
+                    // Left Legs
+                    this.addLeg(this.segments[i], -1.5, 30);
+                    // Right Legs
+                    this.addLeg(this.segments[i], 1.5, 30);
+                }
+
+                // 3. Create Claws (Attached to head)
+                this.addClaw(this, -0.8);
+                this.addClaw(this, 0.8);
+            }
+
+            addLeg(anchor, sideAngle, len) {
+                let segs = [];
+                let prev = anchor;
+                for (let i = 0; i < 3; i++) {
+                    let s = new Segment(prev, 15, 0, 0, 0); // Dummy segments for IK
+                    segs.push(s);
+                    prev = s;
+                }
+                this.limbs.push(new Limb(anchor, segs, sideAngle));
+            }
+
+            addClaw(anchor, sideAngle) {
+                let segs = [];
+                let prev = anchor;
+                for (let i = 0; i < 4; i++) {
+                    let s = new Segment(prev, 25, 0, 0, 0);
+                    segs.push(s);
+                    prev = s;
+                }
+                this.claws.push(new Limb(anchor, segs, sideAngle));
+            }
+
+            update() {
+                // Move Head towards Mouse
+                let dx = Input.mouse.x - this.x;
+                let dy = Input.mouse.y - this.y;
+                let dist = Math.hypot(dx, dy);
+                let targetAngle = Math.atan2(dy, dx);
+
+                // Smooth rotation
+                let diff = targetAngle - this.angle;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                this.angle += diff * 0.1;
+
+                // Move forward if far away
+                if (dist > 20) {
+                    this.x += Math.cos(this.angle) * (dist * 0.05);
+                    this.y += Math.sin(this.angle) * (dist * 0.05);
+                }
+
+                this.absAngle = this.angle; // Helper for children
+
+                // Update Spine (Drag physics)
+                for (let s of this.segments) s.follow(s.parent.x, s.parent.y);
+
+                // Update Limbs
+                this.limbs.forEach(l => l.update());
+
+                // Update Claws (Target is in front of head)
+                this.claws.forEach(c => {
+                    // Force claw targets to hover in front
+                    let offsetAngle = this.angle + (c.side * 1.5);
+                    c.target.x = this.x + Math.cos(offsetAngle) * 80;
+                    c.target.y = this.y + Math.sin(offsetAngle) * 80;
+                    c.stepState = 1; // Always adjusting
+                    c.update();
+                });
+            }
+
+            draw() {
+                // Draw Legs
+                this.limbs.forEach(l => l.drawStyler(ctx, false));
+
+                // Draw Claws
+                this.claws.forEach(l => {
+                    l.drawStyler(ctx, true);
+                    // Draw Pincer at end
+                    let tip = l.segments[l.segments.length - 1];
+                    drawShell(ctx, tip.parent.x, tip.parent.y, tip.x, tip.y, 10, "#0a0a15", "#ff0000");
+                });
+
+                // === CUSTOM HEAD DRAWING (BIGGER) ===
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // 1. Armor Plate (Shield) - Scaled up ~1.6x
+                ctx.beginPath();
+                ctx.moveTo(25, 0);   // Nose (was 15)
+                ctx.lineTo(-8, 20);  // Side flair Left (was -5, 12)
+                ctx.lineTo(-25, 13); // Back Left (was -15, 8)
+                ctx.lineTo(-20, 0);  // Back Center (was -12, 0)
+                ctx.lineTo(-25, -13);// Back Right
+                ctx.lineTo(-8, -20); // Side flair Right
+                ctx.closePath();
+
+                // Gradient Fill
+                let grad = ctx.createLinearGradient(-25, 0, 25, 0);
+                grad.addColorStop(0, "#1a1a2e");
+                grad.addColorStop(0.5, "#4e4e80");
+                grad.addColorStop(1, "#1a1a2e");
+                ctx.fillStyle = grad;
+
+                // Glow/Shadow for 3D effect
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = "#000000";
+                ctx.fill();
+
+                // Rim highlight
+                ctx.strokeStyle = "rgba(100, 100, 255, 0.5)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // 2. Glowing Eyes - Scaled up
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = "#ffaa00";
+                ctx.fillStyle = "#ffaa00";
+
+                ctx.beginPath();
+                ctx.arc(8, -8, 3, 0, Math.PI * 2); // Right Eye (Larger)
+                ctx.arc(8, 8, 3, 0, Math.PI * 2);  // Left Eye (Larger)
+                ctx.fill();
+
+                // 3. Mandibles (Pincers on mouth) - Scaled up
+                ctx.fillStyle = "#050505";
+                ctx.shadowBlur = 0;
+                ctx.beginPath();
+                // Left Mandible
+                ctx.moveTo(25, -3); ctx.lineTo(36, -1.5); ctx.lineTo(25, 0);
+                // Right Mandible
+                ctx.moveTo(25, 3); ctx.lineTo(36, 1.5); ctx.lineTo(25, 0);
+                ctx.fill();
+
+                ctx.restore();
+                // === END HEAD DRAWING ===
+
+                // Draw Body Segments
+                let width = 28; // Increased starting width (was 22) to match larger head
+
+                for (let i = 0; i < this.segments.length; i++) {
+                    let s = this.segments[i];
+                    // Taper the tail
+                    if (i > 8) width -= 2.5;
+                    width = Math.max(4, width);
+
+                    // Color change for tail tip
+                    let color = "#1a1a2e";
+                    let highlight = "#4e4e80";
+                    let glow = false;
+
+                    if (s === this.tailTip) {
+                        color = "#300";
+                        highlight = "#f00";
+                        glow = true;
+                    }
+
+                    drawShell(ctx, s.parent.x, s.parent.y, s.x, s.y, width, color, highlight, glow);
+                }
+            }
+        }
+
+        // --- DRAWING HELPER (The "Skin") ---
+        function drawShell(ctx, x1, y1, x2, y2, width, color, highlight, glow) {
+            ctx.save();
+            ctx.beginPath();
+
+            // Calculate perpendicular vector for thickness
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let len = Math.hypot(dx, dy);
+            let nx = -dy / len * width;
+            let ny = dx / len * width;
+
+            // Draw Oval/Carapace shape
+            ctx.moveTo(x1 + nx, y1 + ny);
+            ctx.lineTo(x2 + nx * 0.5, y2 + ny * 0.5); // Taper end
+            ctx.lineTo(x2 - nx * 0.5, y2 - ny * 0.5);
+            ctx.lineTo(x1 - nx, y1 - ny);
+            ctx.closePath();
+
+            // Style
+            if (glow) {
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = "red";
+                ctx.fillStyle = "#ff0000";
+            } else {
+                // Metallic Gradient
+                let grad = ctx.createLinearGradient(x1, y1, x2, y2);
+                grad.addColorStop(0, color);
+                grad.addColorStop(0.5, highlight); // Shiny ridge
+                grad.addColorStop(1, color);
+                ctx.fillStyle = grad;
+                ctx.shadowBlur = 5;
+                ctx.shadowColor = "black";
+            }
+
+            ctx.fill();
+            // Rim light
+            ctx.strokeStyle = "rgba(255,255,255,0.1)";
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        // --- MAIN LOOP ---
+        const player = new Scorpion();
+
+        function loop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            player.update();
+            player.draw();
+
+            requestAnimationFrame(loop);
+        }
+        loop();
+
+    </script>
+</body>
+
+</html>
