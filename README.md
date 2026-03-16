@@ -2,7 +2,9 @@
 
 A mechanical scorpion that follows your mouse cursor using procedural animation.
 
-**YouTube Demo:** [Watch it in action](https://youtu.be/bH68xT8f1nk)
+## 🎥 YouTube Demo link below👇
+
+[![Watch the Demo](https://img.youtube.com/vi/bH68xT8f1nk/maxresdefault.jpg)](https://youtu.be/bH68xT8f1nk)
 
 ## Tech Stack
 
